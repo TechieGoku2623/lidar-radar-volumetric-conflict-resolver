@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lidar-radar-volumetric-conflict-resolver"
+version = "1.0.0"
+description = "LiDAR Radar Volumetric Conflict Resolver"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "TechieGoku2623" }]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["black==24.8.0", "flake8==7.1.1"]
+
+[project.scripts]
+lidar-radar-volumetric-conflict-resolver = "lidar_radar_volumetric_conflict_resolver.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]

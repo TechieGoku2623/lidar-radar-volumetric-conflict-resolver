@@ -1,15 +1,13 @@
 FROM python:3.12-slim AS builder
 
-WORKDIR /opt/build
-COPY requirements.txt /opt/build/requirements.txt
-COPY src /opt/build/src
-RUN pip install --no-cache-dir -r /opt/build/requirements.txt \
-    && python -m compileall -q /opt/build/src
+WORKDIR /opt/app
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+RUN pip install --no-cache-dir --prefix=/install .
 
 FROM python:3.12-slim
 
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin engine
-WORKDIR /app
-COPY --from=builder /opt/build/src /app/src
+COPY --from=builder /install /usr/local
 USER 10001
-ENTRYPOINT ["python", "src/main.py"]
+ENTRYPOINT ["python", "-m", "lidar_radar_volumetric_conflict_resolver"]

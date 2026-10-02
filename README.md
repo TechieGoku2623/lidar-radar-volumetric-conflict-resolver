@@ -1,103 +1,139 @@
 # LiDAR Radar Volumetric Conflict Resolver
 
-A high-throughput, low-latency asynchronous engine engineered to resolve contradictory lidar clusters and radar tracks that occupy one spatial cell, publishing a confidence-weighted fusion or withholding the track when both confidences are too low.
+A high-throughput, low-latency asynchronous engine engineered to resolve contradictory synthetic lidar and radar tracks inside a spatial gate by publishing a confidence-weighted position and the higher-confidence range rate, or by withholding the pair when both confidences sit below the floor.
 
 ## 🏗️ Systems Architecture & Event Topology
 
-`VolumetricConflictResolver` parses each sensor on its own path and meets them in one merge. `resolve` is the coroutine. A lidar track and a radar track are five-tuples: x, y, z, range rate, confidence. `pack_frame` writes the published numbers as IEEE-754 binary32 plus a state code. The topic name is `vehicle.perception.fused_track`.
+`LidarRadarVolumetricConflictResolver.run` takes one scan of synthetic tracks. Each record is a mapping: `sensor` (`lidar` or `radar`), `x`, `y`, `z` in meters, `range_rate` in meters per second, and `confidence` in `[0, 1]`. Lidar ingress and radar ingress are separate coroutines joined with `asyncio.gather`. A single `_merge` is the only place the two lists meet. That split is the freedom-from-interference shape described in ISO 26262. This module claims no ASIL and does not open a vehicle bus.
 
-Association uses a gate in meters (`gate_m`, default 3). Tracks in the same cell with a range-rate disagreement above `rate_bound` (default 2.5 m/s) are a conflict. The position is blended by confidence. The range rate is blended when the sensors agree and taken from the higher-confidence sensor when they do not. When both confidences are at or below `low_confidence` (default 0.35), the track is withheld: coordinates are null, `publish` is false, and the frame carries zeros.
+Radar points are predicted before association. The Cartesian step is `range_rate * dt` projected onto the position unit vector. A position whose length is below `1e-9` has no direction, so prediction is skipped and the measured point is kept. Association is greedy gated nearest neighbor: each lidar track, in ingest order, takes the closest unused radar track whose Euclidean distance is at most `gate_m` (default 3 m).
 
-An `asyncio.Lock` covers the ledger and the spool. `configure_logging` calls `logging.basicConfig` with timestamps. A non-finite coordinate, a point outside the arena, or a range rate past `max_range_rate` raises `EngineKernelException`. The split between the two ingress paths follows the freedom-from-interference idea in ISO 26262. This module does not claim an ASIL and does not talk to a vehicle bus.
+A conflict is a pair whose range rates differ by more than `rate_bound` (default 2.5 m/s). The test is `2 * statistics.pstdev(pair) > rate_bound`, which is the absolute difference for a two-sample population. The same test is applied to every not-yet-counted pair that shares a cell of size `gate_m`. If both confidences are strictly below `confidence_floor` (default 0.35), the pair is withheld and is not published. Otherwise the position is the confidence-weighted mean of the lidar point and the predicted radar point, and the range rate is taken from the higher-confidence sensor. Ties keep the lidar rate.
+
+A lidar track with no radar partner inside the gate is a dropout. It is counted in `dropouts` and is not fused. Unmatched radar tracks are not dropouts. They can still contribute to a same-cell conflict.
+
+Non-finite fields, a confidence outside `[0, 1]`, or a coordinate outside the 200 m arena raise `EngineKernelException` before a frame is published. The summary frame is `struct` format `>IIII`: fused, withheld, dropouts, conflicts.
 
 ## 📊 Core Visual Walkthrough & Engine Pipeline Flow
 
 ```
-lidar tuples                         radar tuples
-     |                                    |
-     v                                    v
- finite / arena / rate-rate gate     same gate, separate queue
-     \                                  /
-      v                                v
-      cell = floor(coord / gate_m)
+lidar records                         radar records
+     |                                      |
+     v                                      v
+ finite / arena / confidence           same checks, separate coroutine
+     |                                      |
+     |                                      v
+     |                               unit vector of (x, y, z)
+     |                               + range_rate * dt   (skip if degenerate)
+     \                                      /
+      v                                    v
+      greedy nearest neighbor, distance <= gate
       |
-      +-- lidar with no radar partner --> dropout, publish false
-      +-- both confidences low --------> withheld, null coordinates
-      +-- same cell, |rate delta| high -> resolved, rate from higher confidence
-      +-- agreement --------------------> fused, blended rate
+      +-- lidar with no radar partner --> dropouts += 1, not fused
+      +-- both confidences < floor ----> withheld += 1, not published
+      +-- otherwise -------------------> fused position, higher-confidence rate
+      |
+      +-- |range_rate difference| > bound ----> conflicts += 1
+      +-- same cell, contradictory rates ----> conflicts += 1 if not counted
       v
- pack_frame (binary32) on vehicle.perception.fused_track
+ struct summary: fused, withheld, dropouts, conflicts
 ```
 
 Insert the structural terminal walkthrough recording at docs/assets/terminal-walkthrough.gif before publishing the release notes.
 
 ## ⚡ Low-Level OS Mechanics & Network Physics
 
-Separation is `math.dist` on the three coordinates. The cell index is `math.floor` of each axis divided by the gate, so two reports 20 cm apart share a cell and two reports on opposite sides of a boundary do not. Confidence weights are normalized by the sum of the two confidences. The published frame uses `struct` format `>fffffB`. Binary32 cannot hold every binary64 blend; the dict keeps the full-precision blend, and the frame is the value a downstream consumer will decode. The harness compares those two with a tolerance that covers one binary32 rounding.
+The two ingest coroutines each yield once, then parse only their own sensor tag. A fault raised while parsing radar fails the `gather` and does not publish a partial lidar fusion. The merge itself is synchronous and runs while the `asyncio.Lock` is held, so two scans cannot interleave their counters. No CAN frame, no automotive Ethernet socket, and no bus write exists in this process.
 
-`statistics.mean` is the pair confidence. `statistics.pstdev` is the range-rate spread. The ledger is a bounded `deque`. No CAN frame, no Ethernet AVB socket, and no bus write exists in this process. The queues are the interference boundary: a fault raised while parsing radar does not mutate a lidar slot.
+Separation is `math.dist` on the three coordinates. The cell index is `math.floor` of each axis divided by the gate, so two reports that share a cube can contradict even when the Euclidean gate did not pair them. Confidence weights are `c / (c_lidar + c_radar)`. Published confidence is `statistics.fmean` of the two confidences. The summary uses four big-endian uint32 counters. A published track can also be packed as tag plus five float64 fields (`>Bddddd`); that frame is numeric only.
+
+Prediction adds `range_rate * dt * (position / |position|)` to the radar point. `dt` defaults to 0.05 s and may be zero, which leaves the radar point where it was measured. A predicted point that would leave the arena raises rather than being clamped onto the wall.
 
 ## ⚖️ Architecture Trade-offs & Pragmatic Decisions
 
-A multi-hypothesis tracker would carry tracks across scans and would need a motion model and an identifier stable over time. This resolver is one scan. Association is geometric, and the conflict rule is explicit: if the range rates disagree inside one cell, keep the position blend, take the range rate from the sensor with more confidence, and mark `conflict`. If neither sensor is confident, withhold. Withholding is the safe output. Publishing a low-confidence blend would look like a track to a planner.
+A multi-hypothesis tracker would carry tracks across scans and would need a motion model and an identifier stable over time. This resolver is one scan. Association is greedy in lidar ingest order, not a global assignment, so a closer later lidar can lose a radar partner that an earlier lidar already took. The conflict rule is explicit: if the range rates disagree, count the pair, keep the position blend when confidence allows, and take the range rate from the sensor with more confidence.
 
-The arena bound rejects a coordinate that cannot exist in the configured volume instead of clamping it onto the wall. Clamping would create a false cluster on the boundary. The caller who meant that point can raise the arena; the caller who sent a sentinel cannot.
+Withholding is the output when both confidences are below the floor. Publishing a low-confidence blend would look like a track. A lidar cluster with no radar partner is reported as a dropout instead of being copied into the fused list, so a planner that reads only `published` does not see an unconfirmed cluster.
+
+The arena bound rejects a coordinate that cannot exist in the configured volume instead of clamping it onto the wall. Clamping would create a false cluster on the boundary. The caller who meant that point can raise the arena; the caller who sent a sentinel cannot. The default arena is 200 m, and the boundary itself is inside.
 
 ## 🚀 Local Installation & Benchmarking
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-python src/main.py
-python src/test_harness.py
+pip install -e ".[dev]"
+python -m lidar_radar_volumetric_conflict_resolver
+python -m lidar_radar_volumetric_conflict_resolver.harness
 ```
 
 ```python
 import asyncio
 
-from src.main import VolumetricConflictResolver
+from lidar_radar_volumetric_conflict_resolver import (
+    LidarRadarVolumetricConflictResolver,
+)
 
 
 async def demo() -> None:
-    resolver = VolumetricConflictResolver(arena_m=200.0)
-    lidar = [(12.0, -4.0, 0.5, 6.0, 0.82)]
-    radar = [(12.3, -3.9, 0.45, 6.4, 0.70)]
-    try:
-        await resolver.resolve(lidar, radar)
-    finally:
-        await resolver.close()
+    resolver = LidarRadarVolumetricConflictResolver(arena_m=200.0, dt_s=0.05)
+    await resolver.run(
+        [
+            {
+                "sensor": "lidar",
+                "x": 12.0,
+                "y": -4.0,
+                "z": 0.5,
+                "range_rate": 6.0,
+                "confidence": 0.82,
+            },
+            {
+                "sensor": "radar",
+                "x": 12.3,
+                "y": -3.9,
+                "z": 0.45,
+                "range_rate": 6.2,
+                "confidence": 0.70,
+            },
+        ]
+    )
 
 
 asyncio.run(demo())
 ```
 
-The runtime is the Python 3.12 standard library. `pip install -r requirements.txt` succeeds with no third-party packages.
+The runtime is the Python 3.12 standard library. `pip install -r requirements.txt` succeeds with no third-party pins. The tracks above are synthetic numbers, not bus frames. `black==24.8.0` and `flake8==7.1.1` live in the `dev` extra.
 
 ## 🖥️ Terminal Diagnostic Output Preview
 
 ```
-WARNING [volumetric.kernel] range-rate conflict resolved by confidence weight delta=18.00
-WARNING [volumetric.kernel] sensor dropout source=lidar x=30.00 y=-8.00 z=0.40
-INFO [volumetric.kernel] demo complete tracks=2 conflicts=1 dropouts=1
+2026-10-02T02:58:28+0000 WARNING [lidar_radar_volumetric_conflict_resolver] range-rate conflict spread=9.0000
+2026-10-02T02:58:28+0000 WARNING [lidar_radar_volumetric_conflict_resolver] lidar dropout x=30.00 y=-8.00 z=0.40
+2026-10-02T02:58:28+0000 INFO [lidar_radar_volumetric_conflict_resolver] demo complete fused=1 withheld=0 dropouts=1 conflicts=1
 ```
 
-`python src/main.py` exits 0. The orphan lidar point is the dropout. The paired cell with opposing range rates is the conflict.
+`python -m lidar_radar_volumetric_conflict_resolver` exits 0. The orphan lidar point at `(30, -8, 0.4)` is the dropout. The paired reports with range rates 12 m/s and -6 m/s are the conflict. Population spread of that pair is 9.
 
 ## 📊 Empirical Benchmarking Performance Report
 
-Measured by `python src/test_harness.py` with seed 26262, 5000 iterations, `time.perf_counter_ns` latency in microseconds, and `tracemalloc` peak.
+Measured by `python -m lidar_radar_volumetric_conflict_resolver.harness` with seed 26262, 5000 iterations after a warmup of 20, `time.perf_counter_ns` latency in microseconds, and `tracemalloc` peak. The scan is one lidar track and one nearby radar track with agreeing range rates, which fuses with zero conflicts, zero dropouts, and zero withholds.
+
+```
+status=ok seed=26262 iterations=5000 latency_us=296.838 memory_peak_bytes=176413 benchmark_avg_us=303.049 benchmark_p99_us=468.791
+```
 
 | Metric | Measured |
 | --- | ---: |
-| Status | PASS |
+| Status | ok |
+| Seed | 26262 |
 | Iterations | 5000 |
-| Average latency | 275.998 µs |
-| Empirical P99 | 525.056 µs |
-| tracemalloc peak | 586582 bytes |
+| latency_us | 296.838 |
+| memory_peak_bytes | 176413 |
+| benchmark_avg_us | 303.049 |
+| benchmark_p99_us | 468.791 |
 
 ## 🛡️ Edge-Case Resilience & SOC2/Regulatory Compliance
 
-A lidar cluster with no radar partner is a dropout: the lidar coordinates are reported, `publish` is false, and `dropout_count` increments. Contradictory range rates inside one cell are marked `conflict`, the position is confidence-weighted, and the range rate comes from the higher-confidence sensor. When both confidences are low the track is withheld and the published coordinates are null. Non-finite coordinates and points outside the arena raise `EngineKernelException` before a frame is fused.
+A lidar track with no radar partner inside the gate increments `dropouts` and is omitted from `published`. A pair inside the gate whose range rates differ by more than the bound increments `conflicts`; if the two tracks merely share a cell and were not already counted, that pair increments `conflicts` as well. When both confidences are below the floor the pair increments `withheld` and is not published. Non-finite coordinates, a confidence outside the unit interval, and points outside the 200 m arena raise `EngineKernelException` before a frame is fused. The arena boundary (exactly 200 m) is accepted.
 
-ISO 26262 freedom-from-interference is the structural reference for the separate ingress queues. This module claims no ASIL. It does not open a CAN or automotive Ethernet socket and it does not transmit a frame. SOC 2 processing integrity is the withhold rule: a low-confidence pair is counted and is not presented as a fused track.
+ISO 26262 freedom-from-interference is the structural reference for the separate ingest lists and the single merge step. This module claims no ASIL. It does not open a CAN or automotive Ethernet socket and it does not transmit a frame. SOC 2 processing integrity is the withhold rule: a low-confidence pair is counted and is not presented as a fused track. Inputs are synthetic numeric tracks the caller already has.
