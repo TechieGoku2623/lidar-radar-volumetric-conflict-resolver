@@ -13,6 +13,14 @@
 | **Website** | https://github.com/TechieGoku2623/lidar-radar-volumetric-conflict-resolver |
 | **Topics** | `python` `asyncio` `autonomous-vehicles` `lidar` `radar` `sensor-fusion` |
 
+## Watch the demo
+
+<p align="center">
+  <img src="docs/demo.gif" alt="LiDAR Radar Volumetric Conflict Resolver dashboard walkthrough" width="920"/>
+</p>
+
+Play the video: [docs/watch.html](docs/watch.html)
+
 ## The problem this solves
 
 Lidar and radar can lock the same object and disagree on range rate. Averaging them publishes a ghost track. Trusting the weaker sensor publishes a guess.
