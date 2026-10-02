@@ -13,6 +13,14 @@
 | **Website** | https://github.com/TechieGoku2623/lidar-radar-volumetric-conflict-resolver |
 | **Topics** | `python` `asyncio` `autonomous-vehicles` `lidar` `radar` `sensor-fusion` |
 
+## The problem this solves
+
+Lidar and radar can lock the same object and disagree on range rate. Averaging them publishes a ghost track. Trusting the weaker sensor publishes a guess.
+
+Lidar Radar Volumetric Conflict Resolver keeps the two sensor lists separate and associates them with gated nearest neighbor inside a 200 m arena. A pair that disagrees on range rate is a conflict. A pair whose confidences are both low is withheld. Lidar with no radar partner is a dropout, not a completed fusion. The published set is the tracks that agreed.
+
+Keeping a failed sensor from writing the other sensor's track is the freedom-from-interference idea in ISO 26262, applied to perception. The repository does not touch a vehicle bus.
+
 ## Walkthrough
 
 ### How it works
