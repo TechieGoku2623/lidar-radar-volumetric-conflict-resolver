@@ -1,0 +1,3 @@
+# Runtime imports are limited to the Python 3.12 standard library.
+# black and flake8 are installed by the CI job and are not image dependencies.
+# A comment-only requirements file keeps `pip install -r requirements.txt` green.
