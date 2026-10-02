@@ -21,7 +21,17 @@ Non-finite fields, a confidence outside `[0, 1]`, or a coordinate outside the 20
 
 ## 📊 Core Visual Walkthrough & Engine Pipeline Flow
 
-![Terminal walkthrough](docs/assets/terminal-walkthrough.gif)
+Engine run.
+
+![Engine run](docs/assets/terminal-walkthrough.gif)
+
+Benchmark harness.
+
+![Benchmark harness](docs/assets/benchmark-walkthrough.gif)
+
+Unit tests.
+
+![Unit tests](docs/assets/tests-walkthrough.gif)
 
 ```
 lidar records                         radar records
