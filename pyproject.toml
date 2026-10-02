@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lidar-radar-volumetric-conflict-resolver"
 version = "1.0.0"
-description = "LiDAR Radar Volumetric Conflict Resolver"
+description = "Gated lidar and radar association that withholds low-confidence conflicts instead of forcing a fuse."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "TechieGoku2623" }]

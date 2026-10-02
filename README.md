@@ -2,6 +2,11 @@
 
 A high-throughput, low-latency asynchronous engine engineered to resolve contradictory synthetic lidar and radar tracks inside a spatial gate by publishing a confidence-weighted position and the higher-confidence range rate, or by withholding the pair when both confidences sit below the floor.
 
+Website: https://github.com/TechieGoku2623/lidar-radar-volumetric-conflict-resolver
+
+Topics: `python` `asyncio` `autonomous-vehicles` `lidar` `radar` `sensor-fusion`
+
+
 ## 🏗️ Systems Architecture & Event Topology
 
 `LidarRadarVolumetricConflictResolver.run` takes one scan of synthetic tracks. Each record is a mapping: `sensor` (`lidar` or `radar`), `x`, `y`, `z` in meters, `range_rate` in meters per second, and `confidence` in `[0, 1]`. Lidar ingress and radar ingress are separate coroutines joined with `asyncio.gather`. A single `_merge` is the only place the two lists meet. That split is the freedom-from-interference shape described in ISO 26262. This module claims no ASIL and does not open a vehicle bus.
@@ -15,6 +20,8 @@ A lidar track with no radar partner inside the gate is a dropout. It is counted 
 Non-finite fields, a confidence outside `[0, 1]`, or a coordinate outside the 200 m arena raise `EngineKernelException` before a frame is published. The summary frame is `struct` format `>IIII`: fused, withheld, dropouts, conflicts.
 
 ## 📊 Core Visual Walkthrough & Engine Pipeline Flow
+
+![Terminal walkthrough](docs/assets/terminal-walkthrough.gif)
 
 ```
 lidar records                         radar records
